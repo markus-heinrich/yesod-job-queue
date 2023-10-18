@@ -13,8 +13,8 @@ data JobQueue = JobQueue
 -- We'll discuss that later.
 mkYesodSubData "JobQueue" [parseRoutes|
 / JobR GET
-/queue JobQueueR GET POST
+/queue JobQueueR GET
+/enqueue/#String JobEnqueueR POST
 /state JobStateR GET
 /manager JobManagerR GET
-/manager/#Text JobManagerStaticR GET
 |]

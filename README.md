@@ -1,5 +1,6 @@
-# yesod-job-queue [![Hackage](https://img.shields.io/hackage/v/yesod-job-queue.svg?maxAge=25920)](https://hackage.haskell.org/package/yesod-job-queue) [![Stackage LTS](http://stackage.org/package/yesod-job-queue/badge/lts)](http://stackage.org/lts/package/yesod-job-queue) [![Stackage Nightly](http://stackage.org/package/yesod-job-queue/badge/nightly)](http://stackage.org/nightly/package/yesod-job-queue) [![Build Status](https://secure.travis-ci.org/nakaji-dayo/yesod-job-queue.svg)](http://travis-ci.org/nakaji-dayo/yesod-job-queue)
+# yesod-job-queue
 Background jobs library for Yesod.
+Fork of [nakaji-dayo/yesod-job-queue](https://github.com/nakaji-dayo/yesod-job-queue).
 
 - There are API and Web UI for managing the job.
 - Queue backend is Redis.
@@ -8,7 +9,9 @@ Background jobs library for Yesod.
 
 ## Web interface
 
-![web interface screenshot](https://raw.githubusercontent.com/nakaji-dayo/yesod-job-queue/master/doc/yesod-job-queue-ss.png)
+The web interface needs CSS Bootstrap and htmx.
+
+![web interface screenshot](./doc/yesod-job-queue-ss.png)
 
 ## Usage
 
@@ -74,25 +77,6 @@ And, you can change connect info by [queueConnectInfo](https://hackage.haskell.o
 ## Build package
 ```
 stack build
-```
-### build javascripts (required when app/* was editted)
-```
-cd app
-npm install
-npm run build-js
-# need again `stack build`
-```
-#### developping app/*
-You can edit app/app.js without re-build package
-```
-npm run watch-js ## watch app/*.js for changes, automatically build.
-```
-```
-npm run bs ## serving app.bundle.js at `http://localhost:3001/dist/app.bundle.js` for test
-```
-in `example/Main.hs`. to use test version of app.bundle.js.
-```
-jobManagerJSUrl _ = "http://localhost:3001/dist/app.bundle.js"
 ```
 
 ## Run example

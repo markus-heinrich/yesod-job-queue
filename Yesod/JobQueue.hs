@@ -28,8 +28,7 @@ import Control.Concurrent (forkIO)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.STM (TVar)
 import Control.Exception (throwIO)
-import Control.Lens ((^.))
-import Control.Monad (forever, void)
+import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
@@ -40,7 +39,7 @@ import qualified Data.ByteString.Char8 as BSC
 import Data.FileEmbed (embedFile)
 import Data.Foldable (forM_)
 import qualified Data.List as L
-import Data.Maybe (catMaybes)
+import Data.Maybe (mapMaybe)
 import Data.Proxy (Proxy(Proxy))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -52,9 +51,11 @@ import GHC.Generics (Generic, Rep)
 import Text.Read (readMaybe)
 import Yesod.Core
     (HandlerFor, SubHandlerFor, Html, Yesod, YesodSubDispatch(yesodSubDispatch), getYesod,
-     hamlet, invalidArgs, mkYesodSubDispatch, notFound, requireCheckJsonBody,
-     returnJson, sendResponse, toContent, withUrlRenderer, liftHandler)
-import Yesod.Core.Types (HandlerContents(HCError), ErrorResponse(InternalError))
+     hamlet, whamlet, invalidArgs, mkYesodSubDispatch, notFound, requireCheckJsonBody,
+     returnJson, sendResponse, toContent, withUrlRenderer, liftHandler, defaultLayout,
+     toWidget, addScriptRemote, addStylesheetRemote, setTitle, MonadLogger, makeLogger, logInfo, MonadHandler,
+     getRouteToParent)
+import Yesod.Core.Types (HandlerContents(HCError), ErrorResponse(InternalError), Logger)
 
 import Yesod.Persist.Core (YesodPersistBackend)
 
@@ -70,7 +71,7 @@ data RunningJob = RunningJob {
     , threadId :: ThreadNum
     , jobId :: U.UUID
     , startTime :: UTCTime
-    } deriving (Eq)
+    } deriving (Eq, Show)
 
 $(deriveToJSON defaultOptions ''RunningJob)
 
@@ -124,10 +125,6 @@ class (Yesod master, Read (JobType master), Show (JobType master)
     jobAPIBaseUrl :: master -> String
     jobAPIBaseUrl _  = "/job"
 
-    -- | get manager application javascript url (change only development)
-    jobManagerJSUrl :: master -> String
-    jobManagerJSUrl m = (jobAPIBaseUrl m) ++ "/manager/app.js"
-
     -- | Job Information
     describeJob :: master -> JobTypeString -> Maybe Text
     describeJob _ _ = Nothing
@@ -136,10 +133,26 @@ class (Yesod master, Read (JobType master), Show (JobType master)
     getClassInformation :: master -> [JobQueueClassInfo]
     getClassInformation m = [jobQueueInfo m]
 
+    -- | flush queue on startup
+    flushQueueOnStartup :: master -> Bool
+    flushQueueOnStartup _ = False
+
 startDequeue :: (YesodJobQueue master, MonadUnliftIO m) => master -> m ()
 startDequeue m = do
+    -- clear redis queue on startup
+    when (flushQueueOnStartup m) $
+        liftIO $ do
+            conn <- R.connect $ queueConnectInfo m
+            R.runRedis conn $ do
+                result <- R.flushdb
+                liftIO $ handleResultFromRedis result
+    -- start threads
     let num = threadNumber m
     forM_ [1 .. num] $ startThread m
+  where
+    handleResultFromRedis :: Either R.Reply R.Status -> IO ()
+    handleResultFromRedis (Left  _) = putStrLn "[startDequeue] error flushing db"
+    handleResultFromRedis (Right _) = putStrLn "[startDequeue] success flushing db"
 
 -- | start dequeue-ing job in new thread
 startThread :: forall master m . (YesodJobQueue master, MonadUnliftIO m)
@@ -194,8 +207,7 @@ listQueue m = do
         R.lrange (queueKey m) 0 (-1)
     case exs of
      Right xs ->
-         return $ Right $ catMaybes
-         $ map (readMaybe . BSC.unpack) xs
+         return $ Right $ mapMaybe (readMaybe . BSC.unpack) xs
      Left r -> return $ Left $ show r
 
 -- | read JobType from String
@@ -217,82 +229,146 @@ jobTypeProxy :: (YesodJobQueue m) => m -> Proxy (JobType m)
 jobTypeProxy _ = Proxy
 
 -- | get job definitions
-getJobR :: JobHandler master Value
-getJobR = liftHandler $ do
-    y <- getYesod
-    let parseConstr (c:args) = object ["type" .= c, "args" .= args, "description" .= describeJob y c]
-        constrs = map parseConstr $ genericConstructors $ jobTypeProxy y
-    let info = getClassInformation y
-    returnJson $ object ["jobTypes" .= constrs, "information" .= info]
-    -- -- job types
-    -- let f x = object ["type" .= show x, "description" .= describe x]
-    -- let ts = map f $ allJobTypes y
-    -- -- type class info
-    -- let info = getClassInformation y
-    -- returnJson $ object ["jobTypes" .= ts, "information" .= info]
+getJobR :: JobHandler master Html
+getJobR = do
+    toMaster <- getRouteToParent
+    liftHandler $ do
+        $logInfo "Hallo"
+        -- Yesod.Core provides an instance:  MonadLogger (SubHandlerFor child master)
+        y <- getYesod
+        let parseConstr (c:args) = object ["type" .= c, "args" .= args, "description" .= describeJob y c]
+            constrs = map parseConstr $ genericConstructors $ jobTypeProxy y
+        let parseConstr2 (c:args) = (c, args, describeJob y c)
+            constrs2 = map parseConstr2 $ genericConstructors $ jobTypeProxy y
+        let info = getClassInformation y
+        withUrlRenderer [hamlet|
+            <h3>Job Types
+            <!--#{show constrs}-->
+            <table .table.table-striped>
+              <thead>
+                <tr>
+                  <th>Name
+                  <th>Description
+                  <th>Action
+              <tbody>
+                $forall co <- constrs2
+                  <tr>
+                    $with (c, a, mdesc) <- co
+                      <td>#{c}
+                      <td>
+                        $maybe desc <- mdesc
+                          #{desc}
+                      <td>
+                        $if null a
+                          <!-- <button hx-post="@{toMaster JobQueueR}" hx-vals="{ 'job': '#{c}' }" .btn.btn-info>Enqueue -->
+                          <button hx-post="@{toMaster $ JobEnqueueR c}" .btn.btn-info>Enqueue
+                        $else
+                          Args: 
+                          $forall aelem <- a
+                            #{aelem}, 
+
+
+            <h3>Settings
+            <!--#{show info}-->
+            <table .table.table-striped>
+              <thead>
+                <tr>
+                  <th>Class
+                  <th>Information
+              <tbody>
+                $forall i <- info
+                  <tr>
+                    <td>#{_jobQueueClassInfoClassName i}
+                    <td>
+                      $forall v <- _jobQueueClassInfoValues i
+                        #{v}<br />
+        |]
+
 
 -- | get a list of jobs in queue
-getJobQueueR :: JobHandler master Value
+getJobQueueR :: JobHandler master Html
 getJobQueueR = liftHandler $ do
     y <- getYesod
     eitherQ <- liftIO $ listQueue y
     case eitherQ of
         Left err -> liftIO $ throwIO $ HCError $ InternalError $ T.pack $ "Error fetching job queue from Redis: " ++ err
-        Right q -> returnJson $ object ["queue" .= q]
+        Right q ->
+            withUrlRenderer [hamlet|
+                <h3>Queue
+                <table .table.table-striped>
+                  <thead>
+                    <tr>
+                      <th>Type
+                      <th>Enqueued at
+                  <tbody>
+                    $forall job <- q
+                      <tr>
+                        <td>#{queueJobType job}
+                        <td>#{show $ queueTime job}
+                |]
 
 -- | enqueue new job
 postJobQueueR :: JobHandler master Value
 postJobQueueR = liftHandler $ do
     y <- getYesod
     body <- requireCheckJsonBody :: HandlerFor master PostJobQueueRequest
-    case readJobType y (body ^. job) of
+    case readJobType y (_postJobQueueRequestJob body) of
      Just jt -> do
          liftIO $ enqueue y jt
          returnJson $ object []
      Nothing -> invalidArgs ["job"]
 
+postJobEnqueueR :: String -> JobHandler master Html
+postJobEnqueueR job = liftHandler $ do
+    y <- getYesod
+    case readJobType y job of
+        Just jt -> do
+            liftIO $ enqueue y jt
+            -- returnJson $ object []
+            withUrlRenderer [hamlet| success
+            |]
+        Nothing -> -- invalidArgs ["job"]
+            withUrlRenderer [hamlet| error
+            |]
+
 -- | get a list of running jobs
-getJobStateR :: JobHandler master Value
+getJobStateR :: JobHandler master Html
 getJobStateR = liftHandler $ do
     y <- getYesod
     s <- liftIO $ STM.readTVarIO (getJobState y)
-    returnJson $ object ["running" .= s]
+    withUrlRenderer [hamlet|
+        <h3>Running Jobs
+        <table .table.table-striped>
+          <thead>
+            <tr>
+              <th>Type
+              <th>Thread ID
+              <th>Job ID
+              <th>Start at
+          <tbody>
+            $forall job <- s
+              <tr>
+                <td>#{jobType job}
+                <td>#{threadId job}
+                <td>#{show $ jobId job}
+                <td>#{show $ startTime job}
+        |]
 
 getJobManagerR :: JobHandler master Html
-getJobManagerR = liftHandler $ do
-    y <- getYesod
-    withUrlRenderer [hamlet|
-$doctype 5
-<html>
-    <head>
-        <title>YesodJobQueue Manager
-        <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
-        <link rel="stylesheet" href="https://code.getmdl.io/1.1.3/material.blue_grey-red.min.css">
-        <script defer src="https://code.getmdl.io/1.1.3/material.min.js">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <body>
-        <div class="mdl-layout mdl-js-layout mdl-layout--fixed-header">
-            <header class="mdl-layout__header">
-                <div class="mdl-layout__header-row">
-                    <!-- Title -->
-                    <span class="mdl-layout-title">YesodJobQueue Manager
-            <main class="mdl-layout__content">
-                <div id="app" class="page-content">
-        <div id="demo-toast-example" class="mdl-js-snackbar mdl-snackbar">
-            <div class="mdl-snackbar__text">
-            <button class="mdl-snackbar__action" type="button">
-        <script>
-            window.BASE_URL = "#{jobAPIBaseUrl y}"
-        <script src="#{jobManagerJSUrl y}">
-|]
+getJobManagerR = do
+    toMaster <- getRouteToParent
+    liftHandler $ do
+      y <- getYesod
+      defaultLayout $ do
+          setTitle "YesodJobQueue Manager"
+          -- TODO: use widgets instead?
+          toWidget [whamlet|
+          <div id="job-types-and-settings" hx-get="@{toMaster JobR}" hx-trigger="load">
 
--- | Job manager UI (get static page. ajax application)
-getJobManagerStaticR :: Text -> JobHandler master Value
-getJobManagerStaticR f
-    | f == "app.js" = liftHandler $ do
-          let content = toContent $(embedFile "app/dist/app.bundle.js")
-          sendResponse ("application/json" :: ByteString, content)
-    | otherwise = notFound
+          <div id="job-queue" hx-get="@{toMaster JobQueueR}" hx-trigger="load, every 5s">
+
+          <div id="job-running" hx-get="@{toMaster JobStateR}" hx-trigger="load, every 5s">
+          |]
 
 -- | JobQueue manager subsite
 instance YesodJobQueue master => YesodSubDispatch JobQueue master where

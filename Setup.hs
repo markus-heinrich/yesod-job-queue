@@ -9,8 +9,6 @@ import Control.Monad (when, void)
 
 buildHook' :: PackageDescription -> LocalBuildInfo -> UserHooks -> BuildFlags -> IO ()
 buildHook' packageDesc localBuildInfo userHooks buildFlags = do
-    exists <- Dir.doesFileExist "./app/dist/app.bundle.js"
-    when (not exists) $ void $ Proc.system "cd app && npm install && npm run build-js"
     (buildHook DS.simpleUserHooks) packageDesc localBuildInfo userHooks buildFlags
 
 main :: IO ()

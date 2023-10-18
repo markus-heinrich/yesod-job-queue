@@ -1,8 +1,10 @@
-{-# LANGUAGE DerivingStrategies, StandaloneDeriving, UndecidableInstances, DataKinds, FlexibleInstances #-}
+{-# LANGUAGE DerivingStrategies, StandaloneDeriving, UndecidableInstances, DataKinds, FlexibleInstances, TemplateHaskell, InstanceSigs #-}
+
 
 import qualified Prelude as P ()
 import ClassyPrelude.Yesod
 import Yesod.JobQueue
+import qualified Yesod.JobQueue.Routes as JR
 import Yesod.JobQueue.Scheduler
 import Database.Persist.Sqlite
 import Control.Monad.Logger (runStderrLoggingT)
@@ -25,15 +27,38 @@ instance YesodPersist App where
 
 -- Make Yesod App that have ConnectionPool, JobState
 data App = App {
-    appConnPool :: ConnectionPool
-    , appDBConf :: SqliteConf
+      appConnPool :: ConnectionPool
+    , appDBConf   :: SqliteConf
     , appJobState :: JobState
     }
-instance Yesod App
+
 mkYesod "App" [parseRoutes|
 / HomeR GET
 /job JobQueueR JobQueue getJobQueue -- ^ JobQueue API and Manager
 |]
+
+instance Yesod App where
+    --defaultLayout :: WidgetFor site () -> HandlerFor site Html
+    defaultLayout :: Widget -> Handler Html
+    defaultLayout w = do
+        p <- widgetToPageContent w
+        msgs <- getMessages
+        withUrlRenderer [hamlet|
+            $newline never
+            $doctype 5
+            <html>
+                <head>
+                    <title>#{pageTitle p}
+                    $maybe description <- pageDescription p
+                      <meta name="description" content="#{description}">
+                    ^{pageHead p}
+                    <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/bootstrap@3.4.1/dist/css/bootstrap.min.css">
+                    <script src="//unpkg.com/htmx.org@1.6.1">
+                <body>
+                    $forall (status, msg) <- msgs
+                        <p class="message #{status}">#{msg}
+                    ^{pageBody p}
+            |]
 
 -- JobQueue settings
 data MyJobType = AggregationUser
@@ -60,7 +85,6 @@ instance YesodJobQueue App where
     getClassInformation app = [jobQueueInfo app, schedulerInfo app]
     describeJob _ "AggregationUser" = Just "aggregate user's activities"
     describeJob _ _ = Nothing
-    -- jobManagerJSUrl _ = "http://localhost:3001/dist/app.bundle.js" -- use for development with "npm run bs"
     -- queueConnectInfo _ = R.defaultConnectInfo
     --                      {R.connectHost = "127.0.0.1"
     --                      , R.connectPort = R.PortNumber 6379}
@@ -73,8 +97,11 @@ instance YesodJobQueueScheduler App  where
 getHomeR :: HandlerT App IO Html
 getHomeR = defaultLayout $ do
     setTitle "JobQueue sample"
+    -- addStylesheetRemote "//cdn.jsdelivr.net/npm/bootstrap@3.4.1/dist/css/bootstrap.min.css"
+    -- addScriptRemote "//unpkg.com/htmx.org@1.6.1"
     [whamlet|
         <h1>Hello
+        <a href="@{JobQueueR JR.JobManagerR}">Job Manager
     |]
 
 -- Main

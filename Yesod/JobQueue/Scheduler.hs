@@ -24,4 +24,4 @@ class (YesodJobQueue master) => YesodJobQueueScheduler master where
 -- | Need by 'getClassInformation'
 schedulerInfo :: YesodJobQueueScheduler master => master ->  JobQueueClassInfo
 schedulerInfo m = JobQueueClassInfo "Scheduler" $  map showSchedule $ getJobSchedules m
-  where showSchedule (s, jt) = s <> " | " <> (T.pack $ show jt)
+  where showSchedule (s, jt) = s <> " | " <> T.pack (show jt)
