@@ -114,6 +114,7 @@ main = runStderrLoggingT $
            jobState <- newJobState -- ^ create JobState
            let app = App pool dbConf jobState
            startDequeue app
+           startDequeue app
            startJobSchedule app
            warp 3000 app
   where dbConf = SqliteConf "test.db3" 4

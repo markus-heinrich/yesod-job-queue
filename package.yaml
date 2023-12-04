@@ -34,6 +34,7 @@ dependencies:
 - aeson >= 0.6
 - api-field-json-th >= 0.1
 - bytestring
+- containers
 - cron >= 0.6.0
 - file-embed
 - hedis
@@ -54,6 +55,7 @@ dependencies:
 library:
   exposed-modules:
   - Yesod.JobQueue
+  - Yesod.JobQueueSeq
   - Yesod.JobQueue.GenericConstr
   - Yesod.JobQueue.Routes
   - Yesod.JobQueue.Scheduler
@@ -86,9 +88,49 @@ library:
 
 # Runnable executable for our application
 executables:
+  yesod-job-queue-example-memory:
+    main: Main.hs
+    source-dirs: example/memory
+    default-extensions:
+    - TemplateHaskell
+    - QuasiQuotes
+    - OverloadedStrings
+    - TypeFamilies
+    - GADTs
+    - MultiParamTypeClasses
+    - EmptyDataDecls
+    - GeneralizedNewtypeDeriving
+    - DeriveGeneric
+    - DerivingStrategies
+    - StandaloneDeriving
+    - UndecidableInstances
+    - DataKinds
+    - FlexibleInstances
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wall
+    - -fwarn-tabs
+    dependencies:
+    - base >= 4.7
+    - yesod
+    - yesod-core
+    - yesod-job-queue
+    - persistent-sqlite
+    - resourcet
+    - monad-logger
+    - classy-prelude-yesod
+    #- hedis
+    when:
+    - condition: (flag(example-memory))
+      then:
+        buildable: true
+      else:
+        buildable: false
   yesod-job-queue-example:
     main: Main.hs
-    source-dirs: example
+    source-dirs: example/redis
     default-extensions:
     - TemplateHaskell
     - QuasiQuotes
@@ -139,6 +181,10 @@ tests:
 flags:
   example:
     description: Build the example application
+    manual: false
+    default: false
+  example-memory:
+    description: Build the example in-memory application
     manual: false
     default: false
   dev:

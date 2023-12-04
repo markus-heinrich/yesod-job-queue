@@ -1,11 +1,12 @@
 -- | Cron Job for Yesod
 module Yesod.JobQueue.Scheduler where
 
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import qualified Data.Text as T (pack, Text)
 import System.Cron.Schedule
-import Yesod.JobQueue
+import Yesod.JobQueueSeq
 import Yesod.JobQueue.Types
 
 
@@ -17,7 +18,7 @@ class (YesodJobQueue master) => YesodJobQueueScheduler master where
     -- | start schedule
     startJobSchedule :: MonadUnliftIO m => master -> m ()
     startJobSchedule master = do
-        let add (s, jt) = addJob (enqueue master jt) s
+        let add (s, jt) = addJob (void $ enqueue master jt) s
         tids <- liftIO $ execSchedule $ mapM_ add $ getJobSchedules master
         liftIO $ print tids
 

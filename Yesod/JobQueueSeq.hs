@@ -9,14 +9,18 @@
 -- Background jobs library for Yesod.
 -- Use example is in README.md.
 --
-module Yesod.JobQueue (
+module Yesod.JobQueueSeq (
     YesodJobQueue (..)
     , JobId
+    -- maybe also
+    -- , module Data.UUID
     , JobQueue
     , startDequeue
     , enqueue
     , JobState
+    , JobQ
     , newJobState
+    , newJobQueue
     , jobQueueInfo
     , getJobQueue
     ) where
@@ -36,18 +40,16 @@ import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Data.Aeson (Value, (.=), object)
 import Data.Aeson.TH (defaultOptions, deriveToJSON)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as BSC
-import Data.FileEmbed (embedFile)
-import Data.Foldable (forM_)
+import Data.Foldable
 import qualified Data.List as L
-import Data.Maybe (mapMaybe)
 import Data.Proxy (Proxy(Proxy))
+import Data.Sequence((<|), ViewL( (:<) ) )
+import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import qualified Data.UUID as U
 import qualified Data.UUID.V4 as U
-import qualified Database.Redis as R
 import GHC.Generics (Generic, Rep)
 import Text.Read (readMaybe)
 import Yesod.Core
@@ -81,10 +83,14 @@ $(deriveToJSON defaultOptions ''RunningJob)
 
 -- | Manage the running jobs
 type JobState = TVar [RunningJob]
+type JobQ = TVar (Seq.Seq JobQueueItem)
 
 -- | create new JobState
 newJobState :: IO (TVar [RunningJob])
 newJobState = STM.newTVarIO []
+
+newJobQueue :: IO (TVar (Seq.Seq JobQueueItem))
+newJobQueue = STM.newTVarIO Seq.empty
 
 data JobQueueItem = JobQueueItem {
       queueJobType :: JobTypeString
@@ -96,6 +102,7 @@ $(deriveToJSON defaultOptions ''JobQueueItem)
 -- | Backend jobs for Yesod
 class (Yesod master, Read (JobType master), Show (JobType master)
       , Generic (JobType master), Constructors (Rep (JobType master))
+      -- , Backend q
       )
       => YesodJobQueue master where
 
@@ -104,15 +111,10 @@ class (Yesod master, Read (JobType master), Show (JobType master)
 
     -- | Job Handler
     runJob :: MonadUnliftIO m
-              => master -> JobType master -> ReaderT master m ()
+              => master -> JobId -> JobType master -> ReaderT master m ()
 
-    -- | connection info for redis
-    queueConnectInfo :: master -> R.ConnectInfo
-    queueConnectInfo _ = R.defaultConnectInfo
-
-    -- | queue key name for redis
-    queueKey :: master -> ByteString
-    queueKey _ = "yesod-job-queue"
+    -- | get job queue
+    getQ :: master -> JobQ
 
     -- | The number of threads to run the job
     threadNumber :: master -> Int
@@ -121,6 +123,7 @@ class (Yesod master, Read (JobType master), Show (JobType master)
     -- | runDB for job
     runDBJob :: MonadUnliftIO m
                 => ReaderT (YesodPersistBackend master) (ReaderT master m) a
+                -- => YesodDB master m
                 -> ReaderT master m a
 
     -- function to log job state transitions and messages
@@ -150,43 +153,27 @@ class (Yesod master, Read (JobType master), Show (JobType master)
 
 startDequeue :: (YesodJobQueue master, MonadUnliftIO m) => master -> m ()
 startDequeue m = do
-    -- clear redis queue on startup
-    when (flushQueueOnStartup m) $
-        liftIO $ do
-            conn <- R.connect $ queueConnectInfo m
-            R.runRedis conn $ do
-                result <- R.flushdb
-                liftIO $ handleResultFromRedis result
     -- start threads
     let num = threadNumber m
     forM_ [1 .. num] $ startThread m
-  where
-    handleResultFromRedis :: Either R.Reply R.Status -> IO ()
-    handleResultFromRedis (Left  _) = putStrLn "[startDequeue] error flushing db"
-    handleResultFromRedis (Right _) = putStrLn "[startDequeue] success flushing db"
 
 -- | start dequeue-ing job in new thread
 startThread :: forall master m . (YesodJobQueue master, MonadUnliftIO m)
             => master -> ThreadNum -> m ()
 startThread m tNo = void $ liftIO $ forkIO $ do
-    conn <- R.connect $ queueConnectInfo m
-    R.runRedis conn $ forever $ do
-        result <- R.blpop [queueKey m] 600
-        liftIO $ handleResultFromRedis result
+    forever $ do
+        item <- STM.atomically $ do
+            items <- STM.readTVar (getQ m)
+            case Seq.viewl items of
+                Seq.EmptyL   -> STM.retry
+                item :< rest -> STM.writeTVar (getQ m) rest  >> return item
+        let jt = queueJobType item
+        handleJob item $ readJobType m jt
   where
-    handleResultFromRedis :: Either R.Reply (Maybe (ByteString, ByteString)) -> IO ()
-    handleResultFromRedis (Left _) =
-        putStrLn "[dequeue] error in at connection redis"
-    handleResultFromRedis (Right Nothing) =
-        putStrLn "[dequeue] timeout retry"
-    handleResultFromRedis (Right (Just (_, redisValue))) = do
-        let item = readMaybe $ BSC.unpack redisValue
-        handleJob $ readJobType m =<< queueJobType <$> item
-
-    handleJob :: Maybe (JobType master) -> IO ()
-    handleJob Nothing = putStrLn "[dequeue] unknown JobType"
-    handleJob (Just jt) = do
-        jid <- U.nextRandom
+    handleJob :: JobQueueItem -> Maybe (JobType master) -> IO ()
+    handleJob _ Nothing = putStrLn $ "[dequeue-" ++ show tNo ++ "] unknown JobType"
+    handleJob item (Just jt) = do
+        let jid = queueJobId item
         time <- getCurrentTime
         let runningJob = RunningJob
                 { jobType = show jt
@@ -195,12 +182,13 @@ startThread m tNo = void $ liftIO $ forkIO $ do
                 , startTime = time
                 }
         STM.atomically $ STM.modifyTVar (getJobState m) (runningJob:)
-        putStrLn $ "[" ++ (show tNo) ++ "] dequeued: " ++ (show jt)
-        runReaderT (runJob m jt) m
+        runReaderT (logJobState m tNo jid ("Starting "<>show runningJob)) m
+        runReaderT (runJob m jid jt) m
         STM.atomically $ STM.modifyTVar (getJobState m) (L.delete runningJob)
+        runReaderT (logJobState m tNo jid ("Finished "<>show runningJob)) m
 
 -- | Add job to end of the queue
-enqueue :: (MonadIO m, YesodJobQueue master) => master -> JobType master -> m ()
+enqueue :: (MonadIO m, YesodJobQueue master) => master -> JobType master -> m JobId
 enqueue m jt = liftIO $ do
     time <- getCurrentTime
     uid <- U.nextRandom
@@ -209,19 +197,12 @@ enqueue m jt = liftIO $ do
             , queueTime = time
             , queueJobId = uid
             }
-    conn <- R.connect $ queueConnectInfo m
-    void $ R.runRedis conn $ R.rpush (queueKey m) [BSC.pack $ show item]
+    STM.atomically $ STM.modifyTVar (getQ m) (item <|)
+    return uid
 
 -- | Get all jobs in the queue
-listQueue :: YesodJobQueue master => master -> IO (Either String [JobQueueItem])
-listQueue m = do
-    conn <- R.connect $ queueConnectInfo m
-    exs <- R.runRedis conn $ do
-        R.lrange (queueKey m) 0 (-1)
-    case exs of
-     Right xs ->
-         return $ Right $ mapMaybe (readMaybe . BSC.unpack) xs
-     Left r -> return $ Left $ show r
+listQueue :: YesodJobQueue master => master -> IO [JobQueueItem]
+listQueue m = STM.atomically $ STM.readTVar (getQ m) >>= return . toList
 
 -- | read JobType from String
 readJobType :: YesodJobQueue master => master -> String -> Maybe (JobType master)
@@ -302,23 +283,20 @@ getJobR = do
 getJobQueueR :: JobHandler master Html
 getJobQueueR = liftHandler $ do
     y <- getYesod
-    eitherQ <- liftIO $ listQueue y
-    case eitherQ of
-        Left err -> liftIO $ throwIO $ HCError $ InternalError $ T.pack $ "Error fetching job queue from Redis: " ++ err
-        Right q ->
-            withUrlRenderer [hamlet|
-                <h3>Queue
-                <table .table.table-striped>
-                  <thead>
-                    <tr>
-                      <th>Type
-                      <th>Enqueued at
-                  <tbody>
-                    $forall job <- q
-                      <tr>
-                        <td>#{queueJobType job}
-                        <td>#{show $ queueTime job}
-                |]
+    q <- liftIO $ listQueue y
+    withUrlRenderer [hamlet|
+        <h3>Queue
+        <table .table.table-striped>
+          <thead>
+            <tr>
+              <th>Type
+              <th>Enqueued at
+          <tbody>
+            $forall job <- q
+              <tr>
+                <td>#{queueJobType job}
+                <td>#{show $ queueTime job}
+        |]
 
 -- | enqueue new job
 postJobQueueR :: JobHandler master Value
@@ -327,7 +305,7 @@ postJobQueueR = liftHandler $ do
     body <- requireCheckJsonBody :: HandlerFor master PostJobQueueRequest
     case readJobType y (_postJobQueueRequestJob body) of
      Just jt -> do
-         liftIO $ enqueue y jt
+         liftIO $ void $ enqueue y jt
          returnJson $ object []
      Nothing -> invalidArgs ["job"]
 
@@ -336,7 +314,7 @@ postJobEnqueueR job = liftHandler $ do
     y <- getYesod
     case readJobType y job of
         Just jt -> do
-            liftIO $ enqueue y jt
+            liftIO $ void $ enqueue y jt
             -- returnJson $ object []
             withUrlRenderer [hamlet| success
             |]
@@ -374,7 +352,6 @@ getJobManagerR = do
       y <- getYesod
       defaultLayout $ do
           setTitle "YesodJobQueue Manager"
-          -- TODO: use widgets instead?
           toWidget [whamlet|
           <div id="job-types-and-settings" hx-get="@{toMaster JobR}" hx-trigger="load">
 
