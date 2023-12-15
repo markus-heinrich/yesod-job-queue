@@ -129,7 +129,7 @@ class (Yesod master, Read (JobType master), Show (JobType master)
     -- | get job state
     getJobState :: master -> JobState
 
-    getJobStateS :: master -> JobId -> IO (Maybe RunninJob)
+    getJobStateS :: master -> JobId -> IO (Maybe RunningJob)
     getJobStateS master jid = do
         let s = getJobState master
         items <- STM.atomically (STM.readTVar s)
