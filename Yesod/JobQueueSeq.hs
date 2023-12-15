@@ -81,6 +81,13 @@ data RunningJob = RunningJob {
 
 $(deriveToJSON defaultOptions ''RunningJob)
 
+data JobQueueItem = JobQueueItem {
+      queueJobType :: JobTypeString
+    , queueTime    :: UTCTime
+    , queueJobId   :: JobId
+} deriving (Show, Read)
+$(deriveToJSON defaultOptions ''JobQueueItem)
+
 -- | Manage the running jobs
 type JobState = TVar [RunningJob]
 type JobQ = TVar (Seq.Seq JobQueueItem)
@@ -91,13 +98,6 @@ newJobState = STM.newTVarIO []
 
 newJobQueue :: IO (TVar (Seq.Seq JobQueueItem))
 newJobQueue = STM.newTVarIO Seq.empty
-
-data JobQueueItem = JobQueueItem {
-      queueJobType :: JobTypeString
-    , queueTime    :: UTCTime
-    , queueJobId   :: JobId
-} deriving (Show, Read)
-$(deriveToJSON defaultOptions ''JobQueueItem)
 
 -- | Backend jobs for Yesod
 class (Yesod master, Read (JobType master), Show (JobType master)
@@ -126,18 +126,14 @@ class (Yesod master, Read (JobType master), Show (JobType master)
                 -- => YesodDB master m
                 -> ReaderT master m a
 
-    -- function to log job state transitions and messages
-    -- uses putStrLn as default, might be a good idea to save state to DB instead
-    -- TODO: level
-    logJobState :: MonadUnliftIO m => master -> Int -> JobId -> String -> ReaderT master m ()
-    logJobState master tNo jid msg = liftIO (putStrLn $ "[STATE tid-"<> show tNo <>", jobId-" <> show jid <> "] " <> msg)
-
     -- | get job state
     getJobState :: master -> JobState
 
-    -- | get API and Manager base url
-    jobAPIBaseUrl :: master -> String
-    jobAPIBaseUrl _  = "/job"
+    getJobStateS :: master -> JobId -> IO (Maybe RunninJob)
+    getJobStateS master jid = do
+        let s = getJobState master
+        items <- STM.atomically (STM.readTVar s)
+        return $ find (\x -> jobId x == jid) items
 
     -- | Job Information
     describeJob :: master -> JobTypeString -> Maybe Text
@@ -166,7 +162,7 @@ startThread m tNo = void $ liftIO $ forkIO $ do
             items <- STM.readTVar (getQ m)
             case Seq.viewl items of
                 Seq.EmptyL   -> STM.retry
-                item :< rest -> STM.writeTVar (getQ m) rest  >> return item
+                item :< rest -> STM.writeTVar (getQ m) rest >> return item
         let jt = queueJobType item
         handleJob item $ readJobType m jt
   where
@@ -182,10 +178,8 @@ startThread m tNo = void $ liftIO $ forkIO $ do
                 , startTime = time
                 }
         STM.atomically $ STM.modifyTVar (getJobState m) (runningJob:)
-        runReaderT (logJobState m tNo jid ("Starting "<>show runningJob)) m
         runReaderT (runJob m jid jt) m
         STM.atomically $ STM.modifyTVar (getJobState m) (L.delete runningJob)
-        runReaderT (logJobState m tNo jid ("Finished "<>show runningJob)) m
 
 -- | Add job to end of the queue
 enqueue :: (MonadIO m, YesodJobQueue master) => master -> JobType master -> m JobId
@@ -227,8 +221,6 @@ getJobR :: JobHandler master Html
 getJobR = do
     toMaster <- getRouteToParent
     liftHandler $ do
-        $logInfo "Hallo"
-        -- Yesod.Core provides an instance:  MonadLogger (SubHandlerFor child master)
         y <- getYesod
         let parseConstr (c:args) = object ["type" .= c, "args" .= args, "description" .= describeJob y c]
             constrs = map parseConstr $ genericConstructors $ jobTypeProxy y
