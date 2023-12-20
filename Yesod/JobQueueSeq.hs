@@ -23,6 +23,7 @@ module Yesod.JobQueueSeq (
     , newJobQueue
     , jobQueueInfo
     , getJobQueue
+    , RunningJob (..)
     ) where
 
 import Yesod.JobQueue.GenericConstr
@@ -57,7 +58,7 @@ import Yesod.Core
      hamlet, whamlet, invalidArgs, mkYesodSubDispatch, notFound, requireCheckJsonBody,
      returnJson, sendResponse, toContent, withUrlRenderer, liftHandler, defaultLayout,
      toWidget, addScriptRemote, addStylesheetRemote, setTitle, MonadLogger, makeLogger, logInfo, MonadHandler,
-     getRouteToParent)
+     getRouteToParent, PathPiece, PathPiece(..))
 import Yesod.Core.Types (HandlerContents(HCError), ErrorResponse(InternalError), Logger)
 
 import Yesod.Persist.Core (YesodPersistBackend, YesodDB)
@@ -70,6 +71,10 @@ type JobTypeString = String
 
 -- | JobId
 type JobId = U.UUID
+
+instance PathPiece JobId where
+    toPathPiece   = U.toText
+    fromPathPiece = U.fromText
 
 -- | Information of the running job
 data RunningJob = RunningJob {
